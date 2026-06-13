@@ -42,3 +42,4 @@ PRPs and the sprint plan live in the **parent repo** (`../PRPs`, `../docs`).
 - Require `wa_id` (that's WhatsApp-only; address by chat id).
 - Block the webhook waiting on the core (ack first, process async).
 - Run python-telegram-bot's `Application`/updater server — FastAPI owns the route (ADR-006).
+- **Hardcode user-facing literals.** The agent localizes per-user via the system prompt; the few non-agent replies (core unreachable, unsupported type) are English defaults configurable via `.env` (`ERROR_REPLY`/`UNSUPPORTED_REPLY`) — set them per-deployment in your users' language. They must be gateway-local: they fire exactly when the core is unreachable.
