@@ -5,23 +5,33 @@ webhook updates, normalize to the canonical contract (ARCHITECTURE §5), POST
 the core's /ingest, render the canonical response back to Telegram. Plus the
 canonical outbound contract POST /send (ADR-004) for the human-handoff inbox.
 
-This is the SCAFFOLD (epic chasqui-stack/chasqui#6). The app boots and /health
-works; inbound webhook processing (#9) and outbound /send (#10) are stubbed —
-see the TODOs. The library + webhook-integration decision is ADR-006 (#7).
+Library + integration per ADR-006: python-telegram-bot as a Bot API client
+only; FastAPI owns the /webhook route (no PTB Application server). Inbound is
+implemented (#9); outbound POST /send lands in #10.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import sentry_sdk
 from fastapi import FastAPI, Header, HTTPException, Request
+from telegram import Bot, Update
 
 from app.core.config import settings
 
 if settings.sentry_dsn:
     sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.1)
 
+from app.handlers.message_handlers import (  # noqa: E402
+    handle_audio,
+    handle_callback,
+    handle_photo,
+    handle_text,
+    handle_unsupported,
+    handle_voice,
+)
 from app.services.core_client import CoreClient  # noqa: E402
 
 logging.basicConfig(
@@ -31,16 +41,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 core_client: CoreClient | None = None
+bot: Bot | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global core_client
+    global core_client, bot
     core_client = CoreClient(base_url=settings.core_url, api_key=settings.internal_api_key)
+    bot = Bot(token=settings.telegram_bot_token)
+    await bot.initialize()  # PTB Bot needs its HTTPXRequest initialized
+    # Dev convenience: register the webhook on startup when a public URL is set
+    # (e.g. ngrok). In production the webhook is configured once, out of band.
+    if settings.telegram_webhook_url:
+        await bot.set_webhook(
+            url=settings.telegram_webhook_url,
+            secret_token=settings.telegram_webhook_secret,
+            allowed_updates=["message", "callback_query"],
+        )
+        logger.info("Webhook registered → %s", settings.telegram_webhook_url)
     logger.info("Chasqui Telegram gateway started — core=%s", settings.core_url)
-    # TODO(#9): if settings.telegram_webhook_url is set, register it with
-    # setWebhook(secret_token=settings.telegram_webhook_secret) here.
     yield
+    if bot:
+        await bot.shutdown()
     if core_client:
         await core_client.close()
 
@@ -59,8 +81,14 @@ def get_core() -> CoreClient:
     return core_client
 
 
+def get_bot() -> Bot:
+    if bot is None:
+        raise RuntimeError("Bot not initialized")
+    return bot
+
+
 def _verify_webhook_secret(token: str | None) -> None:
-    """Telegram echoes the secret set via setWebhook on every call."""
+    """Telegram echoes the secret set via setWebhook on every call (ADR-006)."""
     if token != settings.telegram_webhook_secret:
         raise HTTPException(
             status_code=401,
@@ -68,21 +96,54 @@ def _verify_webhook_secret(token: str | None) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Ack fast: parse the update, dispatch the core round-trip as a background task
+# and return 200 immediately. Telegram retries — and can disable — a slow
+# webhook, so handlers must never block the response.
+# ---------------------------------------------------------------------------
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _dispatch(coro) -> None:
+    """Fire-and-forget a handler coroutine (kept referenced until done)."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _route(update: Update) -> None:
+    """Pick the handler for an update and dispatch it (no awaiting here)."""
+    b, core = get_bot(), get_core()
+    if update.callback_query is not None:
+        _dispatch(handle_callback(b, update.callback_query, core))
+        return
+    msg = update.message or update.edited_message
+    if msg is None:
+        logger.info("Ignoring update with no message/callback_query")
+        return
+    if msg.text:
+        _dispatch(handle_text(b, msg, core))
+    elif msg.photo:
+        _dispatch(handle_photo(b, msg, core))
+    elif msg.voice:
+        _dispatch(handle_voice(b, msg, core))
+    elif msg.audio:
+        _dispatch(handle_audio(b, msg, core))
+    else:
+        _dispatch(handle_unsupported(b, msg.chat.id))
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Annotated[str | None, Header()] = None,
 ):
-    """Telegram update entry point — verify, ack fast, process async.
-
-    TODO(#9): parse the Update, build the canonical payload (channel="telegram",
-    contact.external_id = chat id), inline media as base64 data: URIs, and
-    dispatch the core round-trip as a background task (the whatsapp/ ack-fast
-    pattern). For now we only authenticate and ack.
-    """
+    """Telegram update entry point — verify, ack fast, process async."""
     _verify_webhook_secret(x_telegram_bot_api_secret_token)
-    await request.body()  # drain
-    logger.info("Webhook received (processing not yet implemented — #9)")
+    data = await request.json()
+    update = Update.de_json(data, get_bot())
+    if update is not None:
+        _route(update)
     return {"ok": True}
 
 
