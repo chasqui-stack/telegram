@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from app.core.config import settings
 from app.services.core_client import CoreClient
+from app.services.formatting import send_markdown
 from app.services.media import media_to_data_uri
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,11 @@ async def _reply_canonical(bot, chat_id, result: dict) -> None:
     """Render the core's canonical response messages back to Telegram."""
     for m in result.get("messages", []):
         if m.get("type") == "text" and m.get("text"):
-            await bot.send_message(chat_id=chat_id, text=m["text"])
+            # Render canonical Markdown → MarkdownV2 (ADR-007), plain fallback.
+            await send_markdown(
+                lambda txt, pm: bot.send_message(chat_id=chat_id, text=txt, parse_mode=pm),
+                m["text"],
+            )
         else:
             # Outbound buttons/media land in #10
             logger.warning("Skipping unsupported outbound message type: %s", m.get("type"))

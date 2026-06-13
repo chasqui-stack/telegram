@@ -2,8 +2,10 @@
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.handlers.message_handlers import (
+    _reply_canonical,
     payload_from_audio,
     payload_from_callback,
     payload_from_photo,
@@ -73,6 +75,17 @@ def test_payload_from_audio_defaults_mime():
     assert p["message"]["text"] == "Song"
     assert p["message"]["raw"]["voice"] is False
     assert p["message"]["raw"]["mime_type"] == "audio/mpeg"
+
+
+async def test_reply_canonical_renders_markdown():
+    """The agent-reply path must render canonical Markdown → MarkdownV2."""
+    bot = AsyncMock()
+    await _reply_canonical(bot, 555, {"messages": [{"type": "text", "text": "**hi** there"}]})
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 555
+    assert kwargs["parse_mode"] == "MarkdownV2"
+    assert "**" not in kwargs["text"]
+    assert "hi" in kwargs["text"]
 
 
 def test_payload_from_callback():

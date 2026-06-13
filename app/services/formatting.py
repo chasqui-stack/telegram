@@ -13,6 +13,7 @@ can fall back to sending the original text as plain (no parse_mode).
 import logging
 
 import telegramify_markdown
+from telegram.error import BadRequest
 
 logger = logging.getLogger(__name__)
 
@@ -26,3 +27,19 @@ def to_markdown_v2(text: str | None) -> str | None:
     except Exception:
         logger.warning("MarkdownV2 conversion failed — will send plain", exc_info=True)
         return None
+
+
+async def send_markdown(send, text: str | None):
+    """Render canonical Markdown to MarkdownV2 and send via `send(text, parse_mode)`.
+
+    Shared by both outbound paths — the agent reply (`_reply_canonical`) and the
+    handoff `/send` (`sender`). Falls back to the original plain text if Telegram
+    rejects the entities (BadRequest), so a malformed entity never drops a reply.
+    """
+    md = to_markdown_v2(text)
+    if md is not None:
+        try:
+            return await send(md, "MarkdownV2")
+        except BadRequest:
+            logger.warning("MarkdownV2 rejected — resending as plain text")
+    return await send(text, None)
