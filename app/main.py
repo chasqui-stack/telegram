@@ -33,6 +33,7 @@ from app.handlers.message_handlers import (  # noqa: E402
     handle_voice,
 )
 from app.services.core_client import CoreClient  # noqa: E402
+from app.services.sender import SendError, SendRequest, send_canonical  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,23 +150,26 @@ async def webhook(
 
 @app.post("/send")
 async def send_message(
+    payload: SendRequest,
     x_internal_api_key: Annotated[str | None, Header()] = None,
 ):
-    """Canonical outbound contract (ADR-004) — mirror of the core's /ingest.
+    """Canonical outbound contract (ADR-004) — the mirror of the core's /ingest.
 
-    TODO(#10): accept the canonical SendRequest and render it on Telegram via
-    sendMessage/sendPhoto/sendVoice/sendDocument, addressed by chat id. No 24h
-    window (unlike WhatsApp), so no WINDOW_EXPIRED.
+    Same shared secret as /ingest; unset key = open (dev), matching the core.
+    Addressed by the chat id; no 24h window (unlike WhatsApp) → no WINDOW_EXPIRED.
     """
     if settings.internal_api_key and x_internal_api_key != settings.internal_api_key:
         raise HTTPException(
             status_code=401,
             detail={"code": "UNAUTHORIZED", "message": "Invalid internal API key"},
         )
-    raise HTTPException(
-        status_code=501,
-        detail={"code": "NOT_IMPLEMENTED", "message": "POST /send lands in #10"},
-    )
+    try:
+        return await send_canonical(get_bot(), payload)
+    except SendError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        )
 
 
 @app.get("/health")
