@@ -43,3 +43,4 @@ PRPs and the sprint plan live in the **parent repo** (`../PRPs`, `../docs`).
 - Block the webhook waiting on the core (ack first, process async).
 - Run python-telegram-bot's `Application`/updater server — FastAPI owns the route (ADR-006).
 - **Hardcode user-facing literals.** The agent localizes per-user via the system prompt; the few non-agent replies (core unreachable, unsupported type) are English defaults configurable via `.env` (`ERROR_REPLY`/`UNSUPPORTED_REPLY`) — set them per-deployment in your users' language. They must be gateway-local: they fire exactly when the core is unreachable.
+- **Send canonical text raw.** `message.text` is Markdown (ARCHITECTURE §5, [ADR-007](https://github.com/chasqui-stack/chasqui/blob/main/docs/design/adr-007-canonical-markdown-rendering.md)); the gateway renders it to MarkdownV2 (`app/services/formatting.py`, with a plain-text fallback) before sending. Don't push channel formatting into the core.

@@ -16,7 +16,9 @@ import base64
 import logging
 
 from pydantic import BaseModel, Field
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
+
+from app.services.formatting import to_markdown_v2
 
 logger = logging.getLogger(__name__)
 
@@ -65,26 +67,56 @@ def _decode_data_uri(uri: str) -> tuple[str, bytes]:
         raise SendError("INVALID_MEDIA", 422, "media_url is not valid base64") from exc
 
 
+async def _send_rendered(send, text: str | None):
+    """Send via `send(rendered_text, parse_mode)` rendering canonical Markdown to
+    Telegram MarkdownV2, falling back to plain `text` if Telegram rejects the
+    entities (BadRequest) — so a malformed entity never drops the message."""
+    md = to_markdown_v2(text)
+    if md is not None:
+        try:
+            return await send(md, "MarkdownV2")
+        except BadRequest:
+            logger.warning("MarkdownV2 rejected — resending as plain text")
+    return await send(text, None)
+
+
 async def _dispatch(bot, chat_id: str, message: SendMessage):
-    """Route one canonical message to the matching PTB send call."""
+    """Route one canonical message to the matching PTB send call.
+
+    Text and media captions are rendered to MarkdownV2 (ARCHITECTURE §5: the
+    core emits canonical Markdown, the gateway renders it to the platform).
+    """
     if message.type == "text":
-        return await bot.send_message(chat_id=chat_id, text=message.text)
+        return await _send_rendered(
+            lambda txt, pm: bot.send_message(chat_id=chat_id, text=txt, parse_mode=pm),
+            message.text,
+        )
 
     mime, data = _decode_data_uri(message.media_url)
     if message.type == "image":
-        return await bot.send_photo(chat_id=chat_id, photo=data, caption=message.text)
+        return await _send_rendered(
+            lambda cap, pm: bot.send_photo(chat_id=chat_id, photo=data, caption=cap, parse_mode=pm),
+            message.text,
+        )
     if message.type == "document":
-        return await bot.send_document(
-            chat_id=chat_id,
-            document=data,
-            filename=message.filename or "document",
-            caption=message.text,
+        return await _send_rendered(
+            lambda cap, pm: bot.send_document(
+                chat_id=chat_id, document=data,
+                filename=message.filename or "document", caption=cap, parse_mode=pm,
+            ),
+            message.text,
         )
     # audio — OGG/Opus renders as a proper voice note; everything else (e.g. the
     # core's mp3 TTS) plays natively via sendAudio, no transcode needed.
     if mime == "audio/ogg":
-        return await bot.send_voice(chat_id=chat_id, voice=data, caption=message.text)
-    return await bot.send_audio(chat_id=chat_id, audio=data, caption=message.text)
+        return await _send_rendered(
+            lambda cap, pm: bot.send_voice(chat_id=chat_id, voice=data, caption=cap, parse_mode=pm),
+            message.text,
+        )
+    return await _send_rendered(
+        lambda cap, pm: bot.send_audio(chat_id=chat_id, audio=data, caption=cap, parse_mode=pm),
+        message.text,
+    )
 
 
 async def send_canonical(bot, request: SendRequest) -> dict:

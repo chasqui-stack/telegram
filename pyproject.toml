@@ -14,6 +14,7 @@ dependencies = [
     # in ADR-006 (chasqui-stack/chasqui#7).
     "python-telegram-bot>=21.0",
     "sentry-sdk>=2.52.0",
+    "telegramify-markdown>=0.5.0",
     "uvicorn[standard]>=0.40.0",
 ]
 
