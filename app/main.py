@@ -45,6 +45,14 @@ core_client: CoreClient | None = None
 bot: Bot | None = None
 
 
+def _normalize_webhook_url(base: str) -> str:
+    """The gateway serves the webhook at /webhook. setWebhook returns 200 even
+    for a wrong path, so a URL missing it silently drops every update (Telegram
+    just gets 404s). Append /webhook if it isn't already there."""
+    base = base.rstrip("/")
+    return base if base.endswith("/webhook") else f"{base}/webhook"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global core_client, bot
@@ -54,12 +62,19 @@ async def lifespan(app: FastAPI):
     # Dev convenience: register the webhook on startup when a public URL is set
     # (e.g. ngrok). In production the webhook is configured once, out of band.
     if settings.telegram_webhook_url:
+        webhook_url = _normalize_webhook_url(settings.telegram_webhook_url)
+        if webhook_url != settings.telegram_webhook_url.rstrip("/"):
+            logger.warning(
+                "TELEGRAM_WEBHOOK_URL did not point at /webhook — using %s "
+                "(Telegram would otherwise get 404 and drop every update)",
+                webhook_url,
+            )
         await bot.set_webhook(
-            url=settings.telegram_webhook_url,
+            url=webhook_url,
             secret_token=settings.telegram_webhook_secret,
             allowed_updates=["message", "callback_query"],
         )
-        logger.info("Webhook registered → %s", settings.telegram_webhook_url)
+        logger.info("Webhook registered → %s", webhook_url)
     logger.info("Chasqui Telegram gateway started — core=%s", settings.core_url)
     yield
     if bot:
